@@ -3,6 +3,28 @@
 version = 4
 
 [[package]]
+name = "adler2"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
+
+[[package]]
+name = "doom2d-mod"
+version = "0.1.0"
+dependencies = [
+ "doomwad",
+ "libc",
+]
+
+[[package]]
+name = "doom2d-tools"
+version = "0.1.0"
+dependencies = [
+ "doomwad",
+ "miniz_oxide",
+]
+
+[[package]]
 name = "doomwad"
 version = "0.1.0"
 
@@ -13,16 +35,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
-name = "topdoom-mod"
-version = "0.1.0"
+name = "miniz_oxide"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
 dependencies = [
- "doomwad",
- "libc",
-]
-
-[[package]]
-name = "topdoom-tools"
-version = "0.1.0"
-dependencies = [
- "doomwad",
+ "adler2",
 ]

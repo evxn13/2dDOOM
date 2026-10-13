@@ -1,20 +1,27 @@
 #!/usr/bin/env bash
-# Lance Doom avec la vue du dessus.
-# Usage : ./run.sh [doom|doom2] [arguments chocolate-doom...]
+# Lance Doom en vue du dessus.
+# Usage : ./run.sh [doom|doom2|CHEMIN.wad] [options de chocolate-doom…]
+#   ex. : ./run.sh doom2 -warp 1 -skill 3
 set -euo pipefail
 cd "$(dirname "$0")"
-cargo build --release -q
+
+[[ -x bin/chocolate-doom && -f doom2d.conf ]] || { echo "Lance d'abord ./install.sh" >&2; exit 1; }
+# shellcheck source=/dev/null
+source doom2d.conf
+
 case "${1:-doom}" in
-  doom2) wad=wads/DOOM2.WAD; shift ;;
-  doom)  wad=wads/DOOM.WAD; [[ $# -gt 0 ]] && shift ;;
-  *)     wad=wads/DOOM.WAD ;;
+  doom)    wad="$DOOM_WAD";  [[ $# -gt 0 ]] && shift ;;
+  doom2)   wad="$DOOM2_WAD"; shift ;;
+  *.wad|*.WAD) wad="$(realpath "$1")"; shift ;;
+  *)       wad="$DOOM_WAD" ;;
 esac
+[[ -n "$wad" && -f "$wad" ]] || { echo "WAD introuvable — relance ./install.sh --wad CHEMIN" >&2; exit 1; }
 
 # Sous Hyprland, le pavé tactile est coupé pendant la frappe : impossible de
 # viser en se déplaçant. On le réactive le temps de la partie, puis on remet
-# la valeur d'origine (la config sur disque n'est pas touchée).
+# la valeur d'origine (la configuration sur disque n'est pas modifiée).
 set_dwt() {
-  # Config Lua (Hyprland récent) : eval ; config classique : keyword.
+  # Configuration Lua (Hyprland récent) : eval ; configuration classique : keyword.
   hyprctl eval "hl.config({ input = { touchpad = { disable_while_typing = $1 } } })" 2>/dev/null | grep -q '^ok' \
     || hyprctl keyword input:touchpad:disable_while_typing "$1" >/dev/null
 }
@@ -25,4 +32,4 @@ if command -v hyprctl >/dev/null && [[ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]];
   fi
 fi
 
-LD_PRELOAD="$PWD/target/release/libtopdoom.so" bin/chocolate-doom-stripped -iwad "$wad" "$@"
+LD_PRELOAD="$PWD/target/release/libdoom2d.so" bin/chocolate-doom -iwad "$wad" "$@"

@@ -31,19 +31,23 @@ impl MainModule {
         (module.base != 0).then_some(module)
     }
 
+    /// `[addr, addr + len)` est-il entièrement dans un segment exécutable ?
+    pub fn is_code(&self, addr: usize, len: usize) -> bool {
+        self.exec_ranges.iter().any(|&(s, e)| addr >= s && addr + len <= e)
+    }
+
     /// Vérifie que `expected` se trouve à `addr`, sans lire hors du code exécutable :
-    /// sous `LD_PRELOAD`, on est aussi chargé dans d'autres programmes (timeout, shell…).
+    /// sous `LD_PRELOAD`, on est aussi chargé dans d'autres programmes.
     pub fn code_matches(&self, addr: usize, expected: &[u8]) -> bool {
-        let end = addr + expected.len();
-        let mapped = self.exec_ranges.iter().any(|&(s, e)| addr >= s && end <= e);
-        mapped && unsafe { core::slice::from_raw_parts(addr as *const u8, expected.len()) } == expected
+        self.is_code(addr, expected.len())
+            && unsafe { core::slice::from_raw_parts(addr as *const u8, expected.len()) } == expected
     }
 }
 
 /// Écrase le début de `target` par `movabs rax, dest ; jmp rax` (12 octets).
 /// La fonction d'origine n'est plus jamais exécutée : pas besoin de trampoline.
 pub unsafe fn install_jump(target: usize, dest: usize) -> Result<(), String> {
-    let mut patch = [0u8; 12];
+    let mut patch = [0u8; crate::profile::PATCH_LEN];
     patch[0] = 0x48;
     patch[1] = 0xb8;
     patch[2..10].copy_from_slice(&(dest as u64).to_le_bytes());

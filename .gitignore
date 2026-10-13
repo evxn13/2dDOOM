@@ -1,7 +1,5 @@
 /target
-/chocolate-doom
+/build
 /bin
 /captures
-/wads
-/engines
-/data
+/doom2d.conf

@@ -67,7 +67,6 @@ fn sdl() -> Option<&'static Sdl> {
         };
         let add_watch: AddEventWatch = sym(c"SDL_AddEventWatch")?;
         add_watch(on_event, core::ptr::null_mut());
-        eprintln!("[topdoom] entrées SDL branchées");
         Some(sdl)
     })
     .as_ref()

@@ -1,28 +1,32 @@
-//! topdoom : remplace le rendu 3D de Chocolate Doom par une vue du dessus.
+//! 2dDOOM : remplace le rendu 3D de Chocolate Doom par une vue du dessus.
 //!
-//! Chargé via `LD_PRELOAD`. Au chargement, on vérifie que le binaire est bien
-//! celui du profil, puis on détourne `R_RenderPlayerView` vers notre rendu.
+//! Chargé via `LD_PRELOAD`. Au démarrage, on retrouve les adresses du jeu,
+//! puis on détourne deux fonctions :
+//! - `R_RenderPlayerView` (rendu de la vue) vers notre rendu vu du dessus ;
+//! - `G_BuildTiccmd` (commande du joueur) pour les contrôles clavier + souris.
 //!
 //! Variables d'environnement :
-//! - `TOPDOOM_ZOOM`        unités de carte par pixel (défaut 2)
-//! - `TOPDOOM_WALL_HEIGHT` hauteur max des murs en relief, en unités (défaut 32)
-//! - `TOPDOOM_FOG`         0 pour désactiver le brouillard de guerre
-//! - `TOPDOOM_WAD`         WAD à lire (défaut : l'argument -iwad du jeu)
-//! - `TOPDOOM_MOUSE_SENS`  pixels de viseur par pixel de souris (défaut 0.5)
-//! - `TOPDOOM_DUMP`        préfixe de fichier pour capturer des images brutes
-//! - `TOPDOOM_DUMP_FRAMES` numéros d'images à capturer, ex. "100,300"
-//! - `TOPDOOM_DUMP_EVERY`  capturer une image toutes les N
-//! - `TOPDOOM_DEBUG`       afficher les commandes envoyées au jeu
-//! - `TOPDOOM_PROFILE`     afficher le temps passé dans chaque étape du rendu
+//! - `DOOM2D_ZOOM`        unités de carte par pixel (défaut 2)
+//! - `DOOM2D_WALL_HEIGHT` hauteur max des murs en relief, en unités (défaut 32)
+//! - `DOOM2D_FOG`         0 pour désactiver le brouillard de guerre
+//! - `DOOM2D_MOUSE_SENS`  pixels de viseur par pixel de souris (défaut 0.5)
+//! - `DOOM2D_WAD`         WAD à lire (défaut : l'argument -iwad du jeu)
+//! - `DOOM2D_DEBUG`       afficher les commandes envoyées au jeu
+//! - `DOOM2D_PROFILE`     afficher le temps passé dans chaque étape du rendu
+//! - `DOOM2D_DUMP`        préfixe de fichier pour capturer des images brutes
+//! - `DOOM2D_DUMP_FRAMES` numéros d'images à capturer, ex. "100,300"
+//! - `DOOM2D_DUMP_EVERY`  capturer une image toutes les N
 
 mod assets;
 mod floorcache;
 mod game;
 mod hook;
 mod input;
+mod interact;
 mod level;
 mod profile;
 mod render;
+mod symbols;
 mod visibility;
 
 use std::sync::OnceLock;
@@ -31,32 +35,55 @@ use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use assets::Assets;
 use game::{Line, Node, Player, Sector, Seg, SpriteDef, Subsector, Ticcmd};
 use level::Level;
-use profile::Profile;
+use profile::Addresses;
 
 const SCREENWIDTH: usize = 320;
 const SCREENHEIGHT: usize = 200;
 
-struct State {
-    base: usize,
-    profile: &'static Profile,
+struct Settings {
     units_per_pixel: f32,
     wall_height: f32,
     fog: bool,
+    mouse_sensitivity: f32,
+    debug: bool,
+    timing: bool,
     dump_prefix: Option<String>,
     dump_frames: Vec<u64>,
     dump_every: u64,
-    debug: bool,
-    timing: bool,
+}
+
+impl Settings {
+    fn from_env() -> Settings {
+        let env = |k: &str| std::env::var(k).ok();
+        let num = |k: &str, default: f32| env(k).and_then(|v| v.parse().ok()).unwrap_or(default);
+        Settings {
+            units_per_pixel: num("DOOM2D_ZOOM", 2.0),
+            wall_height: num("DOOM2D_WALL_HEIGHT", 32.0),
+            fog: env("DOOM2D_FOG").is_none_or(|v| v != "0"),
+            mouse_sensitivity: num("DOOM2D_MOUSE_SENS", 0.5),
+            debug: env("DOOM2D_DEBUG").is_some(),
+            timing: env("DOOM2D_PROFILE").is_some(),
+            dump_prefix: env("DOOM2D_DUMP"),
+            dump_frames: env("DOOM2D_DUMP_FRAMES")
+                .map(|v| v.split(',').filter_map(|n| n.trim().parse().ok()).collect())
+                .unwrap_or_default(),
+            dump_every: env("DOOM2D_DUMP_EVERY").and_then(|v| v.parse().ok()).unwrap_or(0),
+        }
+    }
+}
+
+struct State {
+    addr: Addresses,
+    settings: Settings,
 }
 
 static STATE: OnceLock<State> = OnceLock::new();
-static FRAME: AtomicU64 = AtomicU64::new(0);
 /// Chargées au premier rendu ; `None` si le WAD est illisible.
 static ASSETS: OnceLock<Option<Assets>> = OnceLock::new();
-/// Dernier joueur rendu : sert à connaître son angle au moment de construire la commande.
+/// Dernier joueur rendu : sert à connaître son angle quand on construit la commande.
 static PLAYER: AtomicPtr<Player> = AtomicPtr::new(core::ptr::null_mut());
-/// G_BuildTiccmd d'origine, appelée avant nos modifications.
 static ORIG_BUILD_TICCMD: AtomicUsize = AtomicUsize::new(0);
+static FRAME: AtomicU64 = AtomicU64::new(0);
 
 type BuildTiccmd = extern "C" fn(*mut Ticcmd, core::ffi::c_int);
 
@@ -65,62 +92,50 @@ type BuildTiccmd = extern "C" fn(*mut Ticcmd, core::ffi::c_int);
 static INIT: extern "C" fn() = init;
 
 extern "C" fn init() {
-    let profile = &profile::CHOCOLATE_DOOM_3_1_1;
-    let Some(module) = hook::MainModule::find() else {
-        return;
-    };
-    let base = module.base;
-    let target = base + profile.render_player_view;
-    if !module.code_matches(target, profile.render_signature) {
-        // Pas le bon binaire (ou un autre processus) : on ne touche à rien, en silence.
+    let Some(module) = hook::MainModule::find() else { return };
+    // Pas Chocolate Doom (ou version inconnue) : on ne touche à rien, en silence.
+    let Some((addr, source)) = Addresses::resolve(&module) else { return };
+
+    let settings = Settings::from_env();
+    input::set_sensitivity(settings.mouse_sensitivity);
+    let render = addr.render_player_view;
+    let slot = addr.build_ticcmd_slot() as *mut usize;
+    let build = addr.build_ticcmd;
+    let _ = STATE.set(State { addr, settings });
+
+    eprintln!("[2dDOOM] adresses : {source}");
+    if let Err(e) = unsafe { hook::install_jump(render, render_player_view as extern "C" fn(*mut Player) as usize) } {
+        eprintln!("[2dDOOM] échec du détour du rendu : {e}");
         return;
     }
-
-    let env = |k: &str| std::env::var(k).ok();
-    let state = State {
-        base,
-        profile,
-        units_per_pixel: env("TOPDOOM_ZOOM").and_then(|v| v.parse().ok()).unwrap_or(2.0),
-        wall_height: env("TOPDOOM_WALL_HEIGHT").and_then(|v| v.parse().ok()).unwrap_or(32.0),
-        fog: env("TOPDOOM_FOG").is_none_or(|v| v != "0"),
-        dump_prefix: env("TOPDOOM_DUMP"),
-        dump_frames: env("TOPDOOM_DUMP_FRAMES")
-            .map(|v| v.split(',').filter_map(|n| n.trim().parse().ok()).collect())
-            .unwrap_or_default(),
-        dump_every: env("TOPDOOM_DUMP_EVERY").and_then(|v| v.parse().ok()).unwrap_or(0),
-        debug: env("TOPDOOM_DEBUG").is_some(),
-        timing: env("TOPDOOM_PROFILE").is_some(),
-    };
-    let _ = STATE.set(state);
-    input::set_sensitivity(env("TOPDOOM_MOUSE_SENS").and_then(|v| v.parse().ok()).unwrap_or(0.5));
-
-    match unsafe { hook::install_jump(target, render_player_view as extern "C" fn(*mut Player) as usize) } {
-        Ok(()) => eprintln!("[topdoom] {} : R_RenderPlayerView détourné à {target:#x}", profile.name),
-        Err(e) => eprintln!("[topdoom] échec du détour : {e}"),
-    }
-
-    // Crochet par pointeur : on remplace l'entrée BuildTiccmd de la table de la
-    // boucle principale. La fonction d'origine reste intacte et appelable.
-    let slot = (base + profile.build_ticcmd_slot) as *mut usize;
-    let expected = base + profile.build_ticcmd;
+    // Crochet par pointeur : la fonction d'origine reste intacte et appelable.
     unsafe {
-        if *slot == expected {
-            ORIG_BUILD_TICCMD.store(expected, Ordering::Relaxed);
+        if *slot == build {
+            ORIG_BUILD_TICCMD.store(build, Ordering::Relaxed);
             *slot = build_ticcmd as BuildTiccmd as usize;
-            eprintln!("[topdoom] G_BuildTiccmd détourné (table à {:#x})", slot as usize);
         } else {
-            eprintln!("[topdoom] table de boucle inattendue ({:#x}), contrôles d'origine conservés", *slot);
+            eprintln!("[2dDOOM] table de boucle inattendue, contrôles d'origine conservés");
         }
     }
+}
+
+/// Valeur d'une variable globale du jeu.
+unsafe fn global<T: Copy>(addr: usize) -> T {
+    unsafe { *(addr as *const T) }
+}
+
+/// Tableau du jeu (pointeur + nombre d'éléments), vide s'il n'est pas initialisé.
+unsafe fn array<'a, T>(ptr: *const T, len: i32) -> &'a [T] {
+    if ptr.is_null() || len <= 0 { &[] } else { unsafe { core::slice::from_raw_parts(ptr, len as usize) } }
 }
 
 /// Remplace `void G_BuildTiccmd(ticcmd_t *cmd, int maketic)`.
 extern "C" fn build_ticcmd(cmd: *mut Ticcmd, maketic: core::ffi::c_int) {
     let orig: BuildTiccmd = unsafe { core::mem::transmute(ORIG_BUILD_TICCMD.load(Ordering::Relaxed)) };
-    // Le jeu gère tout le reste : utiliser, changer d'arme, menus…
+    // Le jeu gère tout le reste : changer d'arme, menus, Espace…
     orig(cmd, maketic);
 
-    let player = PLAYER.load(Ordering::Relaxed);
+    let (Some(st), player) = (STATE.get(), PLAYER.load(Ordering::Relaxed)) else { return };
     if player.is_null() || cmd.is_null() {
         return;
     }
@@ -129,149 +144,80 @@ extern "C" fn build_ticcmd(cmd: *mut Ticcmd, maketic: core::ffi::c_int) {
     if mo.is_null() {
         return;
     }
-    let mut target = input::aim_angle(input::cursor(), render::PIXEL_ASPECT);
     let cmd = unsafe { &mut *cmd };
-    // « Utiliser » : on se tourne vers la porte ou l'interrupteur à portée,
-    // le temps d'un tic, quelle que soit la direction du viseur.
-    let wants_use = controls.use_ || cmd.buttons & game::BT_USE != 0;
-    if wants_use && let Some(st) = STATE.get() {
-        let lines = unsafe { array::<Line>(global(st, st.profile.lines), global(st, st.profile.numlines)) };
-        let found = unsafe { use_target(lines, &*mo) };
-        if st.debug {
-            let (x, y) = unsafe { ((*mo).x >> 16, (*mo).y >> 16) };
-            eprintln!("[topdoom] utiliser depuis ({x}, {y}) : cible {}", if found.is_some() { "trouvée" } else { "aucune à portée" });
-        }
-        if let Some(angle) = found {
+    let mut target = input::aim_angle(input::cursor(), render::PIXEL_ASPECT);
+    // « Utiliser » : on se tourne vers la porte ou l'interrupteur à portée le
+    // temps d'un tic, quelle que soit la direction du viseur.
+    if controls.use_ || cmd.buttons & game::BT_USE != 0 {
+        let lines = unsafe { array::<Line>(global(st.addr.lines), global(st.addr.numlines)) };
+        if let Some(angle) = unsafe { interact::use_target(lines, &*mo) } {
             target = angle;
         }
     }
     input::apply(cmd, controls, unsafe { (*mo).angle }, target);
-    if STATE.get().is_some_and(|s| s.debug) && (cmd.forwardmove != 0 || cmd.sidemove != 0 || cmd.buttons != 0) {
+    if st.settings.debug && (cmd.forwardmove != 0 || cmd.sidemove != 0 || cmd.buttons != 0) {
         eprintln!(
-            "[topdoom] tic {maketic}: avant={} côté={} rotation={} boutons={:#x}",
+            "[2dDOOM] tic {maketic} : avant={} côté={} rotation={} boutons={:#x}",
             cmd.forwardmove, cmd.sidemove, cmd.angleturn, cmd.buttons
         );
     }
 }
 
-/// Portée de « utiliser » dans le jeu (USERANGE), un peu réduite par sécurité.
-const USE_RANGE: f32 = 60.0;
-
-/// Angle vers la ligne activable la plus proche, si elle est à portée.
-///
-/// Le jeu trace un rayon de 64 unités dans la direction du joueur et s'arrête au
-/// premier mur : on vise donc un point de la ligne dégagé de tout obstacle.
-/// Le joueur doit aussi être du côté avant de la ligne (règle de P_UseSpecialLine).
-unsafe fn use_target(lines: &[Line], mo: &game::Mobj) -> Option<u32> {
-    let f = |v: i32| v as f32 / 65536.0;
-    let (px, py) = (f(mo.x), f(mo.y));
-    let mut best: Option<(f32, (f32, f32))> = None;
-    for (i, line) in lines.iter().enumerate() {
-        if game::usable(line.special).is_none() {
-            continue;
-        }
-        let (v1, v2) = unsafe { (&*line.v1, &*line.v2) };
-        let (ax, ay) = (f(v1.x), f(v1.y));
-        let (ex, ey) = (f(v2.x) - ax, f(v2.y) - ay);
-        // Côté avant = à droite de v1 -> v2.
-        if ex * (py - ay) - ey * (px - ax) > 0.0 {
-            continue;
-        }
-        for k in 1..10 {
-            let t = k as f32 / 10.0;
-            let (qx, qy) = (ax + t * ex, ay + t * ey);
-            let d = ((qx - px).powi(2) + (qy - py).powi(2)).sqrt();
-            if d >= USE_RANGE || best.is_some_and(|(bd, _)| d >= bd) {
-                continue;
-            }
-            let blocked = lines.iter().enumerate().any(|(j, other)| {
-                j != i && visibility::blocks_sight(other) && unsafe { crosses(other, (px, py), (qx, qy)) }
-            });
-            if !blocked {
-                best = Some((d, (qx - px, qy - py)));
-            }
-        }
-    }
-    let (_, (dx, dy)) = best?;
-    Some((dy.atan2(dx) / core::f32::consts::TAU * 4294967296.0) as i64 as u32)
-}
-
-/// Le segment p -> q coupe-t-il la ligne ? (extrémités de q exclues)
-unsafe fn crosses(line: &Line, p: (f32, f32), q: (f32, f32)) -> bool {
-    let f = |v: i32| v as f32 / 65536.0;
-    let (v1, v2) = unsafe { (&*line.v1, &*line.v2) };
-    let (a, b) = ((f(v1.x), f(v1.y)), (f(v2.x), f(v2.y)));
-    let cross = |o: (f32, f32), u: (f32, f32), w: (f32, f32)| (u.0 - o.0) * (w.1 - o.1) - (u.1 - o.1) * (w.0 - o.0);
-    let (d1, d2) = (cross(a, b, p), cross(a, b, q));
-    let (d3, d4) = (cross(p, q, a), cross(p, q, b));
-    (d1 > 0.0) != (d2 > 0.0) && (d3 > 0.0) != (d4 > 0.0) && d2.abs() > 1e-3
-}
-
-/// Tableau du jeu (pointeur + nombre d'éléments), vide si non initialisé.
-unsafe fn array<'a, T>(ptr: *const T, len: i32) -> &'a [T] {
-    if ptr.is_null() || len <= 0 { &[] } else { unsafe { core::slice::from_raw_parts(ptr, len as usize) } }
-}
-
-unsafe fn global<T: Copy>(state: &State, offset: usize) -> T {
-    unsafe { *((state.base + offset) as *const T) }
-}
-
 /// Remplace `void R_RenderPlayerView(player_t *player)`.
 extern "C" fn render_player_view(player: *mut Player) {
     let Some(st) = STATE.get() else { return };
-    let p = st.profile;
+    let (a, s) = (&st.addr, &st.settings);
+    let Some(assets) = ASSETS.get_or_init(|| {
+        Assets::load().inspect_err(|e| eprintln!("[2dDOOM] ressources indisponibles : {e}")).ok()
+    }) else {
+        return;
+    };
     unsafe {
-        let video: *mut u8 = global(st, p.video_buffer);
-        if video.is_null() || player.is_null() {
+        let video: *mut u8 = global(a.video_buffer);
+        let flattranslation: *const i32 = global(a.flattranslation);
+        let segs: *const Seg = global(a.segs);
+        if video.is_null() || player.is_null() || flattranslation.is_null() || segs.is_null() {
             return;
         }
         let mut canvas = render::Canvas {
             buf: video,
             stride: SCREENWIDTH,
-            x0: global(st, p.viewwindowx),
-            y0: global(st, p.viewwindowy),
-            w: global(st, p.scaledviewwidth),
-            h: global(st, p.viewheight),
+            x0: global(a.viewwindowx),
+            y0: global(a.viewwindowy),
+            w: global(a.scaledviewwidth),
+            h: global(a.viewheight),
         };
-        let assets = ASSETS.get_or_init(|| {
-            Assets::load().inspect_err(|e| eprintln!("[topdoom] ressources indisponibles : {e}")).ok()
-        });
-        let Some(assets) = assets else { return };
         let frame = render::Frame {
             player: &*player,
             level: Level {
-                lines: array(global(st, p.lines), global(st, p.numlines)),
-                nodes: array::<Node>(global(st, p.nodes), global(st, p.numnodes)),
-                subsectors: array::<Subsector>(global(st, p.subsectors), global(st, p.numsubsectors)),
-                segs: global::<*const Seg>(st, p.segs),
+                lines: array::<Line>(global(a.lines), global(a.numlines)),
+                nodes: array::<Node>(global(a.nodes), global(a.numnodes)),
+                subsectors: array::<Subsector>(global(a.subsectors), global(a.numsubsectors)),
+                segs,
             },
-            sectors: array::<Sector>(global(st, p.sectors), global(st, p.numsectors)),
+            sectors: array::<Sector>(global(a.sectors), global(a.numsectors)),
             assets,
-            flattranslation: global(st, p.flattranslation),
-            skyflatnum: global(st, p.skyflatnum),
-            sprites: array::<SpriteDef>(global(st, p.sprites), global(st, p.numsprites)),
-            units_per_pixel: st.units_per_pixel,
-            wall_height: st.wall_height,
-            fog: st.fog,
-            timing: st.timing,
+            flattranslation,
+            skyflatnum: global(a.skyflatnum),
+            sprites: array::<SpriteDef>(global(a.sprites), global(a.numsprites)),
+            units_per_pixel: s.units_per_pixel,
+            wall_height: s.wall_height,
+            fog: s.fog,
+            timing: s.timing,
         };
-        if frame.flattranslation.is_null() || frame.level.segs.is_null() {
-            return;
-        }
         render::draw_frame(&mut canvas, &frame);
         input::set_view_size(canvas.w, canvas.h);
         render::crosshair(&mut canvas, input::cursor());
         PLAYER.store(player, Ordering::Relaxed);
 
-        let frame = FRAME.fetch_add(1, Ordering::Relaxed);
-        if let Some(prefix) = &st.dump_prefix
-            && (st.dump_frames.contains(&frame) || (st.dump_every > 0 && frame % st.dump_every == 0))
+        let n = FRAME.fetch_add(1, Ordering::Relaxed);
+        if let Some(prefix) = &s.dump_prefix
+            && (s.dump_frames.contains(&n) || (s.dump_every > 0 && n % s.dump_every == 0))
         {
             let screen = core::slice::from_raw_parts(video, SCREENWIDTH * SCREENHEIGHT);
-            let path = format!("{prefix}-{frame:05}.raw");
-            match std::fs::write(&path, screen) {
-                Ok(()) => eprintln!("[topdoom] image {frame} -> {path}"),
-                Err(e) => eprintln!("[topdoom] capture {path} : {e}"),
+            let path = format!("{prefix}-{n:05}.raw");
+            if let Err(e) = std::fs::write(&path, screen) {
+                eprintln!("[2dDOOM] capture {path} : {e}");
             }
         }
     }

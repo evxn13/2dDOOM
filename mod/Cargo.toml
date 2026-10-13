@@ -1,10 +1,10 @@
 [package]
-name = "topdoom-mod"
+name = "doom2d-mod"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "topdoom"
+name = "doom2d"
 crate-type = ["cdylib"]
 
 [dependencies]

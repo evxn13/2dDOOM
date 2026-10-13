@@ -1,10 +1,11 @@
 [package]
-name = "topdoom-tools"
+name = "doom2d-tools"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 doomwad = { path = "../doomwad" }
+miniz_oxide = "0.8"
 
 [[bin]]
 name = "frame2png"

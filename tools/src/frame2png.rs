@@ -1,7 +1,9 @@
 //! Convertit une capture brute 320x200 (indices de palette) en PNG,
 //! avec la palette PLAYPAL lue dans le WAD.
 //!
-//! Usage : frame2png <capture.raw> <DOOM.WAD> <sortie.png>
+//! Usage : frame2png <capture.raw> <DOOM.WAD> <sortie.png> [facteur]
+//! Le facteur optionnel agrandit l'image (pixels dupliqués), en corrigeant le
+//! rapport 4:3 d'origine (pixels 1,2 fois plus hauts que larges).
 
 use std::fs;
 
@@ -12,38 +14,36 @@ const H: usize = 200;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 4 {
-        eprintln!("usage : frame2png <capture.raw> <DOOM.WAD> <sortie.png>");
+    if !(4..=5).contains(&args.len()) {
+        eprintln!("usage : frame2png <capture.raw> <DOOM.WAD> <sortie.png> [facteur]");
         std::process::exit(2);
     }
+    let scale: usize = args.get(4).map_or(1, |s| s.parse().expect("facteur entier attendu"));
     let raw = fs::read(&args[1]).expect("lecture de la capture");
     assert_eq!(raw.len(), W * H, "capture de taille inattendue");
     let wad = Wad::open(&args[2]).expect("lecture du WAD");
     let pal = wad.lump_by_name("PLAYPAL").expect("lump PLAYPAL introuvable");
 
-    let mut rgb = Vec::with_capacity(W * H * 3);
-    for &i in &raw {
-        rgb.extend_from_slice(&pal[i as usize * 3..i as usize * 3 + 3]);
+    // Sans agrandissement, on garde l'image brute ; sinon 320x200 -> 4:3.
+    let (w, h) = if scale == 1 { (W, H) } else { (W * scale, H * scale * 6 / 5) };
+    let mut rgb = Vec::with_capacity(w * h * 3);
+    for y in 0..h {
+        for x in 0..w {
+            let i = raw[(y * H / h) * W + x * W / w] as usize;
+            rgb.extend_from_slice(&pal[i * 3..i * 3 + 3]);
+        }
     }
-    fs::write(&args[3], encode_png(W as u32, H as u32, &rgb)).expect("écriture du PNG");
+    fs::write(&args[3], encode_png(w as u32, h as u32, &rgb)).expect("écriture du PNG");
 }
 
-/// PNG minimal sans dépendance : deflate en blocs « stockés » (non compressés).
+/// PNG RGB 8 bits, sans filtre, compressé avec zlib.
 fn encode_png(w: u32, h: u32, rgb: &[u8]) -> Vec<u8> {
     let mut raw = Vec::with_capacity(rgb.len() + h as usize);
     for row in rgb.chunks(w as usize * 3) {
         raw.push(0); // filtre « None »
         raw.extend_from_slice(row);
     }
-    let mut z = vec![0x78, 0x01];
-    let mut chunks = raw.chunks(65535).peekable();
-    while let Some(c) = chunks.next() {
-        z.push(chunks.peek().is_none() as u8);
-        z.extend_from_slice(&(c.len() as u16).to_le_bytes());
-        z.extend_from_slice(&(!(c.len() as u16)).to_le_bytes());
-        z.extend_from_slice(c);
-    }
-    z.extend_from_slice(&adler32(&raw).to_be_bytes());
+    let z = miniz_oxide::deflate::compress_to_vec_zlib(&raw, 9);
 
     let mut ihdr = Vec::new();
     ihdr.extend_from_slice(&w.to_be_bytes());
@@ -60,15 +60,6 @@ fn encode_png(w: u32, h: u32, rgb: &[u8]) -> Vec<u8> {
         out.extend_from_slice(&crc.to_be_bytes());
     }
     out
-}
-
-fn adler32(data: &[u8]) -> u32 {
-    let (mut a, mut b) = (1u32, 0u32);
-    for &x in data {
-        a = (a + x as u32) % 65521;
-        b = (b + a) % 65521;
-    }
-    (b << 16) | a
 }
 
 fn crc32(data: &[u8]) -> u32 {

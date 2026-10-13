@@ -1,11 +1,11 @@
 //! Rendu vue du dessus, directement dans le tampon 8 bits de Doom.
 
-use doomwad::Patch;
-
-use crate::assets::{Assets, fogged, light_colormap};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use doomwad::{Patch, Texture};
+
+use crate::assets::{Assets, fogged, light_colormap};
 use crate::floorcache::{self, CELL_SHIFT, FloorCache, VOID};
 use crate::game::*;
 use crate::level::Level;
@@ -180,7 +180,7 @@ pub fn draw_frame(canvas: &mut Canvas, f: &Frame) {
     let t1 = Instant::now();
     draw_lines(canvas, f, &cam);
     let t2 = Instant::now();
-    let mut items = collect_faces(canvas, f, &cam, vis.as_ref());
+    let mut items = collect_faces(canvas, f, &cam);
     collect_sprites(&mut items, canvas, f, &cam, vis.as_ref());
     // Du haut vers le bas de l'écran : ce qui est plus près de la caméra passe devant.
     items.sort_by(|a, b| a.key().total_cmp(&b.key()));
@@ -193,12 +193,12 @@ pub fn draw_frame(canvas: &mut Canvas, f: &Frame) {
     draw_usable_lines(canvas, f, &cam);
     let t3 = Instant::now();
     if f.timing {
-        profile([t1 - t0, t2 - t1, t3 - t2]);
+        report_timing([t1 - t0, t2 - t1, t3 - t2]);
     }
 }
 
 /// Moyennes par image, affichées toutes les 500 images.
-fn profile(t: [Duration; 3]) {
+fn report_timing(t: [Duration; 3]) {
     static ACC: Mutex<([Duration; 3], u32)> = Mutex::new(([Duration::ZERO; 3], 0));
     let mut acc = ACC.lock().unwrap_or_else(|e| e.into_inner());
     for (a, d) in acc.0.iter_mut().zip(t) {
@@ -208,7 +208,7 @@ fn profile(t: [Duration; 3]) {
     if acc.1 == 500 {
         let us = |d: Duration| d.as_micros() / 500;
         eprintln!(
-            "[topdoom] µs/image : sols {} · contours {} · murs+sprites {}",
+            "[2dDOOM] µs/image : sols {} · contours {} · murs+sprites {}",
             us(acc.0[0]), us(acc.0[1]), us(acc.0[2])
         );
         *acc = ([Duration::ZERO; 3], 0);
@@ -286,9 +286,8 @@ fn line_color(line: &Line) -> Option<u8> {
         return Some(color::WALL);
     }
     let (front, back) = unsafe { (&*line.frontsector, &*line.backsector) };
-    if back.ceilingheight <= back.floorheight || front.ceilingheight <= front.floorheight {
-        Some(color::LEDGE)
-    } else if (front.floorheight - back.floorheight).abs() > MAX_STEP {
+    let closed = back.ceilingheight <= back.floorheight || front.ceilingheight <= front.floorheight;
+    if closed || (front.floorheight - back.floorheight).abs() > MAX_STEP {
         Some(color::LEDGE)
     } else {
         None // marche franchissable ou simple changement de plafond
@@ -315,13 +314,13 @@ struct VisSprite<'a> {
     feet: f32,
     /// Ligne du sol sous l'objet : clé de tri.
     ground: f32,
-    cmap: Option<usize>,
+    cmap: usize,
     shadow: bool,
 }
 
 /// Face de mur tournée vers la caméra, dessinée en relief.
 struct Face<'a> {
-    tex: &'a doomwad::Texture,
+    tex: &'a Texture,
     /// Extrémités de la base à l'écran (x0 < x1).
     x0: f32,
     y0: f32,
@@ -352,7 +351,7 @@ impl Item<'_> {
     }
 }
 
-fn collect_faces<'a>(canvas: &Canvas, f: &Frame<'a>, cam: &Camera, _vis: Option<&Visibility>) -> Vec<Item<'a>> {
+fn collect_faces<'a>(canvas: &Canvas, f: &Frame<'a>, cam: &Camera) -> Vec<Item<'a>> {
     let mut items = Vec::with_capacity(512);
     let (w, h) = (canvas.w as f32, canvas.h as f32);
     let max_h = f.wall_height.max(0.0);
@@ -459,9 +458,9 @@ fn collect_sprites<'a>(items: &mut Vec<Item<'a>>, canvas: &Canvas, f: &Frame<'a>
             .and_then(|ss| unsafe { ss.sector.as_ref() })
             .map_or(160, |s| s.lightlevel);
         let cmap = if m.frame & FF_FULLBRIGHT != 0 && f.player.fixedcolormap == 0 {
-            Some(0)
+            0
         } else {
-            Some(light_colormap(light, f.player.extralight, f.player.fixedcolormap))
+            light_colormap(light, f.player.extralight, f.player.fixedcolormap)
         };
         let altitude = (m.z - m.floorz).max(0) as f32 / FRAC;
         items.push(Item::Sprite(VisSprite {
@@ -502,7 +501,7 @@ fn draw_sprite(canvas: &mut Canvas, assets: &Assets, v: &VisSprite, scale: f32) 
     let x0 = v.sx - left as f32 * scale;
     let y0 = v.feet - p.top as f32 * scale;
     let (w, h) = ((p.width as f32 * scale).ceil() as i32, (p.height as f32 * scale).ceil() as i32);
-    let cmap = assets.colormap(if v.shadow { 26 } else { v.cmap.unwrap_or(0) });
+    let cmap = assets.colormap(if v.shadow { 26 } else { v.cmap });
     let (ix0, iy0) = (x0.round() as i32, y0.round() as i32);
     for dy in 0..h {
         let ty = ((dy as f32 + 0.5) / scale) as i32;

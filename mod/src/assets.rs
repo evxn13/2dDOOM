@@ -14,9 +14,9 @@ pub struct Assets {
     pub textures: Vec<Texture>,
 }
 
-/// Le chemin du WAD : `TOPDOOM_WAD`, sinon l'argument `-iwad` du jeu.
+/// Le chemin du WAD : `DOOM2D_WAD`, sinon l'argument `-iwad` du jeu.
 fn wad_path() -> Option<String> {
-    if let Ok(p) = std::env::var("TOPDOOM_WAD") {
+    if let Ok(p) = std::env::var("DOOM2D_WAD") {
         return Some(p);
     }
     let cmdline = std::fs::read("/proc/self/cmdline").ok()?;
@@ -27,7 +27,7 @@ fn wad_path() -> Option<String> {
 
 impl Assets {
     pub fn load() -> Result<Assets, String> {
-        let path = wad_path().ok_or("WAD introuvable (passer -iwad ou TOPDOOM_WAD)")?;
+        let path = wad_path().ok_or("WAD introuvable (passer -iwad ou DOOM2D_WAD)")?;
         let wad = Wad::open(&path)?;
         let colormaps = wad.lump_by_name("COLORMAP").ok_or("lump COLORMAP absent")?.to_vec();
         if colormaps.len() < 34 * 256 {
@@ -38,7 +38,6 @@ impl Assets {
         let last_sprite = wad.find("S_END").ok_or("marqueur S_END absent")?;
         let sprites = (first_sprite..last_sprite).map(|i| wad.lump(i).and_then(Patch::parse)).collect();
         let textures = wad.textures()?;
-        eprintln!("[topdoom] ressources chargées depuis {path} ({} textures)", textures.len());
         Ok(Assets { wad, colormaps, first_flat, sprites, textures })
     }
 

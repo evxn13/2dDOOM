@@ -48,7 +48,6 @@ pub struct Mobj {
     pub health: i32,
 }
 
-
 /// `player_t` (partiel).
 #[repr(C)]
 pub struct Player {
@@ -93,7 +92,7 @@ pub struct Side {
 }
 
 /// Rôle d'une ligne activable avec « utiliser » (spéciaux vanilla Doom / Doom II).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Usable {
     Door,
     BlueDoor,
@@ -208,36 +207,36 @@ pub struct Ticcmd {
 pub const BT_ATTACK: u8 = 1;
 pub const BT_USE: u8 = 2;
 
-// Si la mise en page diverge du binaire, on refuse de compiler.
+// Mise en page relevée dans le binaire (x86_64) : si elle diverge, on refuse de compiler.
 const _: () = {
     assert!(offset_of!(Mobj, x) == 0x18);
     assert!(offset_of!(Mobj, angle) == 0x38);
+    assert!(offset_of!(Mobj, sprite) == 0x3c);
+    assert!(offset_of!(Mobj, frame) == 0x40);
     assert!(offset_of!(Mobj, radius) == 104);
     assert!(offset_of!(Mobj, flags) == 160);
     assert!(offset_of!(Mobj, health) == 164);
+    assert!(offset_of!(Player, extralight) == 0x100);
+    assert!(offset_of!(Player, fixedcolormap) == 0x104);
+    assert!(offset_of!(Sector, lightlevel) == 12);
+    assert!(size_of::<Sector>() == 0x80);
+    assert!(offset_of!(Side, midtexture) == 12);
+    assert!(size_of::<Side>() == 24);
     assert!(offset_of!(Line, special) == 0x1a);
     assert!(offset_of!(Line, bbox) == 36);
     assert!(offset_of!(Line, frontsector) == 56);
     assert!(offset_of!(Line, backsector) == 64);
     assert!(size_of::<Line>() == 0x58);
+    assert!(offset_of!(Node, children) == 0x30);
+    assert!(size_of::<Node>() == 0x34);
+    assert!(size_of::<Subsector>() == 0x10);
+    assert!(offset_of!(Seg, backsector) == 48);
+    assert!(size_of::<Seg>() == 0x38);
+    assert!(size_of::<SpriteDef>() == 0x10);
+    assert!(offset_of!(SpriteFrame, flip) == 0x14);
+    assert!(size_of::<SpriteFrame>() == 0x1c);
     assert!(offset_of!(Ticcmd, buttons) == 5);
     assert!(size_of::<Ticcmd>() == 16);
-    assert!(offset_of!(Player, extralight) == 0x100);
-    assert!(offset_of!(Player, fixedcolormap) == 0x104);
-    assert!(offset_of!(Mobj, sprite) == 0x3c);
-    assert!(offset_of!(Mobj, frame) == 0x40);
-    assert!(offset_of!(Sector, lightlevel) == 12);
-    assert!(size_of::<Sector>() == 0x80);
-    assert!(size_of::<Node>() == 0x34);
-    assert!(offset_of!(Node, children) == 0x30);
-    assert!(size_of::<Subsector>() == 0x10);
-    assert!(size_of::<Seg>() == 0x38);
-    assert!(size_of::<Side>() == 24);
-    assert!(offset_of!(Side, midtexture) == 12);
-    assert!(offset_of!(Seg, backsector) == 48);
-    assert!(size_of::<SpriteDef>() == 0x10);
-    assert!(size_of::<SpriteFrame>() == 0x1c);
-    assert!(offset_of!(SpriteFrame, flip) == 0x14);
 };
 
 /// Itère sur tous les objets du monde en suivant la liste chaînée des thinkers.
