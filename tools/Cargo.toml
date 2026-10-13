@@ -1,0 +1,15 @@
+[package]
+name = "topdoom-tools"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+doomwad = { path = "../doomwad" }
+
+[[bin]]
+name = "frame2png"
+path = "src/frame2png.rs"
+
+[[bin]]
+name = "xinject"
+path = "src/xinject.rs"

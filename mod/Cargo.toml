@@ -1,0 +1,12 @@
+[package]
+name = "topdoom-mod"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "topdoom"
+crate-type = ["cdylib"]
+
+[dependencies]
+libc = "0.2"
+doomwad = { path = "../doomwad" }
